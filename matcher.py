@@ -179,8 +179,36 @@ def _parse_price(price_str: str) -> float | None:
         return None
 
 
+def _effective_price(offer: dict) -> float | None:
+    """
+    Resolve the true selling price for an offer, regardless of source.
+
+    Priority:
+      1. selling_price  (if present and < mrp — confirms it is a real discount)
+      2. discounted_price / offer_price  (Bigbasket alternate field names)
+      3. mrp  (fallback — means no discount info available)
+
+    If selling_price >= mrp, it is almost certainly the MRP field mislabelled,
+    so we swap to mrp and treat the item as having no discount.
+    """
+    sp  = _parse_price(offer.get("selling_price"))
+    mrp = _parse_price(offer.get("mrp"))
+
+    # Bigbasket alternate field names
+    if sp is None:
+        sp = _parse_price(offer.get("discounted_price") or offer.get("offer_price"))
+
+    if sp is not None and mrp is not None:
+        # selling_price looks like MRP (not discounted) — ignore it
+        if sp >= mrp:
+            return mrp
+        return sp
+
+    return sp if sp is not None else mrp
+
+
 def _best_offer(offers: list[dict]) -> dict | None:
-    priced = [(o, _parse_price(o.get("selling_price"))) for o in offers]
+    priced = [(o, _effective_price(o)) for o in offers]
     priced = [(o, p) for o, p in priced if p is not None]
     if not priced:
         return None
@@ -188,21 +216,20 @@ def _best_offer(offers: list[dict]) -> dict | None:
 
 
 def _savings_str(offers: list[dict]) -> str | None:
-    best = _best_offer(offers)
-    if not best:
+    """
+    Savings = difference between the highest and lowest *effective* selling price.
+    Uses MRP-based discount sanity check: if any platform's effective price
+    equals its MRP, that platform has no real discount and should not inflate
+    the savings figure.
+    """
+    prices = [_effective_price(o) for o in offers]
+    prices = [p for p in prices if p is not None]
+    if len(prices) < 2:
         return None
-
-    selling = _parse_price(best.get("selling_price"))
-    mrp     = _parse_price(best.get("mrp"))          # need mrp in offer dict
-
-    if selling is None or mrp is None:
-        return None
-    diff = mrp - selling
+    diff = max(prices) - min(prices)
     if diff < 0.5:
         return None
-
-    source = best.get("source", "").capitalize()
-    return f"Save ₹{diff:.0f} on {source}"
+    return f"Save ₹{diff:.0f} vs costliest"
 
 
 # ── Canonical name / qty ──────────────────────────────────────────────────────
