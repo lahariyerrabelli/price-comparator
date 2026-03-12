@@ -188,14 +188,21 @@ def _best_offer(offers: list[dict]) -> dict | None:
 
 
 def _savings_str(offers: list[dict]) -> str | None:
-    prices = [_parse_price(o.get("selling_price")) for o in offers]
-    prices = [p for p in prices if p is not None]
-    if len(prices) < 2:
+    best = _best_offer(offers)
+    if not best:
         return None
-    diff = max(prices) - min(prices)
+
+    selling = _parse_price(best.get("selling_price"))
+    mrp     = _parse_price(best.get("mrp"))          # need mrp in offer dict
+
+    if selling is None or mrp is None:
+        return None
+    diff = mrp - selling
     if diff < 0.5:
         return None
-    return f"Save ₹{diff:.0f} vs costliest"
+
+    source = best.get("source", "").capitalize()
+    return f"Save ₹{diff:.0f} on {source}"
 
 
 # ── Canonical name / qty ──────────────────────────────────────────────────────
