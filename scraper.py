@@ -1,7 +1,3 @@
-"""
-scraper.py  –  Selenium scrapers for Blinkit, Zepto, BigBasket with product URLs
-Optimised for speed: batch DOM extraction, minimal sleeps, JS-based scroll+extract.
-"""
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -10,7 +6,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-import re
 
 # ── Chrome options ────────────────────────────────────────────────────────────
 def _make_options() -> Options:
@@ -74,7 +69,6 @@ BIGBASKET_BASE = "https://www.bigbasket.com"
 
 _PAGE_LOAD_TIMEOUT = 12   # seconds for WebDriverWait
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _chrome() -> webdriver.Chrome:
@@ -88,7 +82,6 @@ def _chrome() -> webdriver.Chrome:
     driver._tmp_dir = tmp_dir  # store for cleanup
     return driver
 
-
 def _wait_for_cards(driver, css: str, timeout: float = _PAGE_LOAD_TIMEOUT) -> list:
     """Block until at least one card is present, then return all."""
     try:
@@ -98,7 +91,6 @@ def _wait_for_cards(driver, css: str, timeout: float = _PAGE_LOAD_TIMEOUT) -> li
     except Exception:
         pass
     return driver.find_elements(By.CSS_SELECTOR, css)
-
 
 def _scroll_all_cards(driver, cards: list):
     """
@@ -110,7 +102,6 @@ def _scroll_all_cards(driver, cards: list):
         cards,
     )
     time.sleep(1.2)
-
 
 def _wait_img_src(driver, img_el, timeout: float = 4) -> str:
     """Wait for a real (non-placeholder) src on an already-visible img element."""
@@ -128,7 +119,6 @@ def _wait_img_src(driver, img_el, timeout: float = 4) -> str:
         src = img_el.get_attribute("src") or ""
         return src if src.startswith("http") else "N/A"
 
-
 def _resolve_img(driver, img_elements: list, idx: int, initial_src: str) -> str:
     """Return image URL; wait for lazy-load only if needed."""
     src = initial_src or ""
@@ -140,32 +130,15 @@ def _resolve_img(driver, img_elements: list, idx: int, initial_src: str) -> str:
         return _wait_img_src(driver, img_el, timeout=3)
     return "N/A"
 
-
-def _slugify(name: str) -> str:
-    """Convert a product name to a URL-safe slug (matches Blinkit's pattern)."""
-    slug = name.lower()
-    slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = re.sub(r"[\s_]+", "-", slug)
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return slug or "product"
-
-
-def _build_url(href: str, base: str, fallback: str, keep_query: bool = False) -> str:
-    """
-    FIX: Added keep_query parameter. Zepto and BigBasket product hrefs sometimes
-    need their query string to resolve correctly, so we no longer strip it by default
-    for those platforms. Only strip when the caller explicitly passes keep_query=False.
-    """
+def _build_url(href: str, base: str, fallback: str) -> str:
     if not href:
         return fallback
-    if not keep_query:
-        href = href.split("?")[0]
+    href = href.split("?")[0]
     if href.startswith("http"):
         return href
     if href.startswith("/"):
         return base + href
     return fallback
-
 
 # ── Blinkit ──────────────────────────────────────────────────────────────────
 
@@ -193,8 +166,6 @@ def scrape_blinkit(item: str, location: str) -> list[dict]:
                 const mrp  = el.querySelector("div[style*='color: var(--colors-grey-600)'] span span");
                 const disc = el.querySelector("div[style*='color: var(--colors-white-900)']");
                 const img  = el.querySelector("div[style*='aspect-ratio'] img");
-                // FIX: Also capture the product anchor href for a real URL
-                const anchor = el.querySelector("a[href*='/prn/']") || el.querySelector("a[href*='/pn/']");
                 return {
                     id:            el.id || '',
                     name:          name ? name.innerText.trim() : 'N/A',
@@ -203,7 +174,6 @@ def scrape_blinkit(item: str, location: str) -> list[dict]:
                     mrp:           mrp  ? mrp.innerText.trim()  : 'N/A',
                     discount:      disc ? disc.innerText.trim() : 'N/A',
                     img_src:       img  ? (img.src || img.getAttribute('data-src') || '') : '',
-                    href:          anchor ? anchor.getAttribute('href') : '',
                 };
             });
         """, cards)
@@ -217,20 +187,10 @@ def scrape_blinkit(item: str, location: str) -> list[dict]:
             name = row.get("name", "N/A")
             if not name or name == "N/A":
                 continue
-
-            # FIX: Build a real Blinkit product URL.
-            # Prefer the scraped anchor href; fall back to constructing from name + id.
-            # Real pattern: /pn/{slug}/prid/{id}  (NOT /prn/product-slug/prid/{id})
-            href = row.get("href", "")
-            pid  = row.get("id", "")
-            if href:
-                product_url = _build_url(href, BLINKIT_BASE, fallback_url)
-            elif pid:
-                slug = _slugify(name)
-                product_url = f"{BLINKIT_BASE}/pn/{slug}/prid/{pid}"
-            else:
-                product_url = fallback_url
-
+            pid = row.get("id", "")
+            product_url = (
+                f"{BLINKIT_BASE}/prn/product-slug/prid/{pid}" if pid else fallback_url
+            )
             results.append({
                 "name":          name,
                 "quantity":      row.get("quantity",      "N/A"),
@@ -255,7 +215,6 @@ def scrape_blinkit(item: str, location: str) -> list[dict]:
         except Exception:
             pass
     return results
-
 
 # ── Zepto ────────────────────────────────────────────────────────────────────
 
@@ -291,7 +250,6 @@ def scrape_zepto(item: str, location: str) -> list[dict]:
                     discount:      disc ? disc.innerText.trim() : 'N/A',
                     selling_price: sp,
                     mrp:           mrp,
-                    // FIX: Keep full href including query string for Zepto
                     href:          el.getAttribute('href') || '',
                     img_src:       img ? (img.src || img.getAttribute('data-src') || '') : '',
                 };
@@ -313,8 +271,7 @@ def scrape_zepto(item: str, location: str) -> list[dict]:
                 "mrp":           row.get("mrp",           "N/A"),
                 "discount":      row.get("discount",      "N/A"),
                 "image_url":     _resolve_img(driver, img_elements, i, row.get("img_src", "")),
-                # FIX: keep_query=True — Zepto URLs may need query params
-                "product_url":   _build_url(row.get("href", ""), ZEPTO_BASE, fallback_url, keep_query=True),
+                "product_url":   _build_url(row.get("href", ""), ZEPTO_BASE, fallback_url),
                 "source":        "zepto",
             })
     except Exception as e:
@@ -322,7 +279,6 @@ def scrape_zepto(item: str, location: str) -> list[dict]:
     finally:
         driver.quit()
     return results
-
 
 # ── BigBasket ────────────────────────────────────────────────────────────────
 # IMPORTANT: CSS class "py-1.5" contains a literal dot.
@@ -406,7 +362,6 @@ return arguments[0].map(card => {
 });
 """
 
-
 def scrape_big_basket(item: str, location: str) -> list[dict]:
     driver = _chrome()
     results = []
@@ -419,16 +374,13 @@ def scrape_big_basket(item: str, location: str) -> list[dict]:
             return results
 
         # Deduplicate by href (image <a> and name <a> share the same href)
-        # FIX: Preserve the full href including query params for BB product pages
         seen: set[str] = set()
         unique: list[tuple] = []
         for c in cards:
-            raw_href = c.get_attribute("href") or ""
-            # Deduplicate on path only (ignore query), but store full href
-            href_key = raw_href.split("?")[0]
-            if href_key and href_key not in seen:
-                seen.add(href_key)
-                unique.append((c, raw_href))
+            href = (c.get_attribute("href") or "").split("?")[0]
+            if href and href not in seen:
+                seen.add(href)
+                unique.append((c, href))
 
         print(f"[BigBasket] {len(unique)} unique products")
         unique_cards = [c for c, _ in unique]
@@ -443,10 +395,6 @@ def scrape_big_basket(item: str, location: str) -> list[dict]:
             name = row.get("name", "N/A")
             if not name or name == "N/A":
                 continue
-            # FIX: keep_query=True to preserve BigBasket URL query params
-            product_url = _build_url(
-                row.get("href", ""), BIGBASKET_BASE, fallback_url, keep_query=True
-            )
             results.append({
                 "name":          name,
                 "quantity":      row.get("quantity",      "N/A"),
@@ -454,7 +402,7 @@ def scrape_big_basket(item: str, location: str) -> list[dict]:
                 "mrp":           row.get("mrp",           "N/A"),
                 "discount":      row.get("discount",      "N/A"),
                 "image_url":     _resolve_img(driver, img_elements, i, row.get("img_src", "")),
-                "product_url":   product_url,
+                "product_url":   _build_url(row.get("href", ""), BIGBASKET_BASE, fallback_url),
                 "source":        "bigbasket",
             })
     except Exception as e:
@@ -462,7 +410,6 @@ def scrape_big_basket(item: str, location: str) -> list[dict]:
     finally:
         driver.quit()
     return results
-
 
 # ── Parallel entry point ──────────────────────────────────────────────────────
 
@@ -489,3 +436,4 @@ def scrape_all(item: str, location: str) -> tuple[list, list, list]:
                 store[name] = []
 
     return (store["blinkit"], store["zepto"], store["bigbasket"])
+

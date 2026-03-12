@@ -1,9 +1,3 @@
-"""
-matcher.py  –  NLP-based fuzzy product matching & price comparison
-Groups products from Blinkit, Zepto, BigBasket by semantic similarity.
-Uses TF-IDF vectors with cosine similarity for product name matching.
-"""
-
 import re
 import math
 import unicodedata
