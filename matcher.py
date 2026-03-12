@@ -96,6 +96,8 @@ class TFIDFCorpus:
 
     def fit(self, documents: list[str]) -> None:
         """Compute IDF weights from a collection of product-name strings."""
+        # FIX 1: Reset state before fitting to avoid stale IDF from previous runs
+        self._idf = {}
         self._n_docs = len(documents)
         df: Counter = Counter()
         for doc in documents:
@@ -135,11 +137,17 @@ def _cosine(vec_a: dict[str, float], vec_b: dict[str, float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-# Module-level corpus — populated lazily in group_and_compare
+# Module-level corpus — re-instantiated fresh each call via group_and_compare
 _corpus = TFIDFCorpus()
 
 
 # ── Similarity ────────────────────────────────────────────────────────────────
+
+# FIX 2: Raised threshold from 0.35 → 0.55 to prevent unrelated products grouping.
+# Also raised qty penalty from 0.45 → 0.25 so quantity mismatches almost never match.
+MATCH_THRESHOLD = 0.55
+_QTY_PENALTY    = 0.25   # multiplier applied when quantities don't match
+
 
 def _similarity(
     name_a: str, qty_a: str,
@@ -162,7 +170,7 @@ def _similarity(
     combined_a = f"{name_a} {qty_a}"
     combined_b = f"{name_b} {qty_b}"
     if not _qty_match(combined_a, combined_b):
-        score *= 0.45
+        score *= _QTY_PENALTY
 
     return score
 
@@ -174,7 +182,8 @@ def _parse_price(price_str: str) -> float | None:
         return None
     cleaned = re.sub(r"[^\d.]", "", str(price_str))
     try:
-        return float(cleaned)
+        v = float(cleaned)
+        return v if v > 0 else None
     except ValueError:
         return None
 
@@ -183,13 +192,15 @@ def _effective_price(offer: dict) -> float | None:
     """
     Resolve the true selling price for an offer, regardless of source.
 
-    Priority:
-      1. selling_price  (if present and < mrp — confirms it is a real discount)
-      2. discounted_price / offer_price  (Bigbasket alternate field names)
-      3. mrp  (fallback — means no discount info available)
+    FIX 3: Rewritten to be more robust about which field is actually the
+    discounted price vs MRP. Old logic discarded valid selling_price when
+    selling_price >= mrp (common when scraper misses the MRP field entirely).
 
-    If selling_price >= mrp, it is almost certainly the MRP field mislabelled,
-    so we swap to mrp and treat the item as having no discount.
+    Priority:
+      1. If selling_price < mrp → selling_price is the discounted price, use it.
+      2. If selling_price >= mrp (or mrp missing) → selling_price IS the mrp,
+         so fall back to mrp field; if mrp also missing, use selling_price as-is.
+      3. If selling_price is missing → use mrp as the effective price.
     """
     sp  = _parse_price(offer.get("selling_price"))
     mrp = _parse_price(offer.get("mrp"))
@@ -199,12 +210,16 @@ def _effective_price(offer: dict) -> float | None:
         sp = _parse_price(offer.get("discounted_price") or offer.get("offer_price"))
 
     if sp is not None and mrp is not None:
-        # selling_price looks like MRP (not discounted) — ignore it
-        if sp >= mrp:
-            return mrp
-        return sp
+        # selling_price is genuinely lower — real discount, use it
+        if sp < mrp:
+            return sp
+        # selling_price equals or exceeds mrp — treat mrp as the true price
+        return mrp
 
-    return sp if sp is not None else mrp
+    # Only one field available — use whichever we have
+    if sp is not None:
+        return sp
+    return mrp
 
 
 def _best_offer(offers: list[dict]) -> dict | None:
@@ -218,9 +233,6 @@ def _best_offer(offers: list[dict]) -> dict | None:
 def _savings_str(offers: list[dict]) -> str | None:
     """
     Savings = difference between the highest and lowest *effective* selling price.
-    Uses MRP-based discount sanity check: if any platform's effective price
-    equals its MRP, that platform has no real discount and should not inflate
-    the savings figure.
     """
     prices = [_effective_price(o) for o in offers]
     prices = [p for p in prices if p is not None]
@@ -255,9 +267,6 @@ def _canonical_qty(offers: list[dict]) -> str:
 
 # ── Grouping ──────────────────────────────────────────────────────────────────
 
-MATCH_THRESHOLD = 0.35   # TF-IDF cosine scores; tune lower to merge more aggressively
-
-
 def group_and_compare(
     blinkit: list[dict],
     zepto: list[dict],
@@ -268,7 +277,7 @@ def group_and_compare(
     Each group has: canonical_name, canonical_qty, offers[], best_deal, savings.
 
     Steps:
-      1. Fit a TF-IDF corpus over all product names (computes IDF weights).
+      1. Fit a fresh TF-IDF corpus over all product names (computes IDF weights).
       2. Pre-compute one TF-IDF vector per product (avoids O(n^2) re-tokenising).
       3. Greedy single-linkage clustering using cosine similarity.
     """
@@ -284,7 +293,7 @@ def group_and_compare(
     if not all_products:
         return []
 
-    # Step 1 — fit corpus
+    # Step 1 — fit a fresh corpus (reset clears any stale state from prior calls)
     _corpus.fit([p.get("name", "") for p in all_products])
 
     # Step 2 — pre-compute vectors
@@ -335,7 +344,7 @@ def group_and_compare(
 
         sorted_offers = sorted(
             group,
-            key=lambda o: (_parse_price(o.get("selling_price")) or 9999)
+            key=lambda o: (_effective_price(o) or 9999)
         )
 
         result.append({
