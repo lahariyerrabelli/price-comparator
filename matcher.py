@@ -1,11 +1,13 @@
 """
 matcher.py  –  NLP-based fuzzy product matching & price comparison
 Groups products from Blinkit, Zepto, BigBasket by semantic similarity.
+Uses TF-IDF vectors with cosine similarity for product name matching.
 """
 
 import re
+import math
 import unicodedata
-from difflib import SequenceMatcher
+from collections import Counter
 
 
 # ── Text normalisation ────────────────────────────────────────────────────────
@@ -38,17 +40,15 @@ def _norm_unit(u: str) -> str:
 
 
 def _parse_qty(text: str) -> tuple[float, str] | None:
-    """Extract (numeric_value_in_base_unit, canonical_unit) from a qty string."""
     m = _QTY_RE.search(text or "")
     if not m:
         return None
     val  = float(m.group(1))
     unit = _norm_unit(m.group(2))
-    # Convert to base units for numeric comparison
     if unit == "g":
         return (val, "g")
     if unit == "l":
-        return (val * 1000, "ml_equiv")  # compare ml vs l on same scale
+        return (val * 1000, "ml_equiv")
     if unit == "ml":
         return (val, "ml_equiv")
     if unit == "kg":
@@ -57,7 +57,6 @@ def _parse_qty(text: str) -> tuple[float, str] | None:
 
 
 def _qty_match(a: str, b: str) -> bool:
-    """True if both have no qty, or same qty in compatible units (±5%)."""
     qa, qb = _parse_qty(a), _parse_qty(b)
     if qa is None and qb is None:
         return True
@@ -79,28 +78,87 @@ def _clean(text: str) -> str:
     return text
 
 
-def _tokens(text: str) -> set[str]:
-    return {w for w in _clean(text).split() if w not in _STOP and len(w) > 1}
+def _tokens(text: str) -> list[str]:
+    return [w for w in _clean(text).split() if w not in _STOP and len(w) > 1]
 
 
-def _jaccard(a: set, b: set) -> float:
-    if not a or not b:
+# ── TF-IDF corpus ─────────────────────────────────────────────────────────────
+
+class TFIDFCorpus:
+    """
+    Lightweight TF-IDF engine built over all product names seen so far.
+    Call .fit(documents) once, then .vector(text) to get a sparse TF-IDF dict.
+    """
+
+    def __init__(self) -> None:
+        self._idf: dict[str, float] = {}
+        self._n_docs: int = 0
+
+    def fit(self, documents: list[str]) -> None:
+        """Compute IDF weights from a collection of product-name strings."""
+        self._n_docs = len(documents)
+        df: Counter = Counter()
+        for doc in documents:
+            df.update(set(_tokens(doc)))
+        # Smoothed IDF: log((1 + N) / (1 + df)) + 1
+        self._idf = {
+            term: math.log((1 + self._n_docs) / (1 + count)) + 1
+            for term, count in df.items()
+        }
+
+    def vector(self, text: str) -> dict[str, float]:
+        """
+        Return a TF-IDF vector as {term: weight}.
+        TF = raw term count / doc length  (normalised term frequency)
+        """
+        toks = _tokens(text)
+        if not toks:
+            return {}
+        tf_raw = Counter(toks)
+        doc_len = len(toks)
+        vec: dict[str, float] = {}
+        for term, cnt in tf_raw.items():
+            idf = self._idf.get(term, math.log((1 + self._n_docs) / 1) + 1)
+            vec[term] = (cnt / doc_len) * idf
+        return vec
+
+
+def _cosine(vec_a: dict[str, float], vec_b: dict[str, float]) -> float:
+    """Cosine similarity between two sparse TF-IDF vectors."""
+    if not vec_a or not vec_b:
         return 0.0
-    return len(a & b) / len(a | b)
+    dot = sum(vec_a[t] * vec_b[t] for t in vec_a if t in vec_b)
+    mag_a = math.sqrt(sum(v * v for v in vec_a.values()))
+    mag_b = math.sqrt(sum(v * v for v in vec_b.values()))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
 
 
-def _seq_sim(a: str, b: str) -> float:
-    return SequenceMatcher(None, _clean(a), _clean(b)).ratio()
+# Module-level corpus — populated lazily in group_and_compare
+_corpus = TFIDFCorpus()
 
 
-def _similarity(name_a: str, qty_a: str, name_b: str, qty_b: str) -> float:
-    """Combined similarity score [0..1]."""
-    ta, tb = _tokens(name_a), _tokens(name_b)
-    jacc = _jaccard(ta, tb)
-    seq  = _seq_sim(name_a, name_b)
-    score = 0.6 * jacc + 0.4 * seq
+# ── Similarity ────────────────────────────────────────────────────────────────
 
-    # Penalise if quantities are incompatible
+def _similarity(
+    name_a: str, qty_a: str,
+    name_b: str, qty_b: str,
+    vec_a: dict[str, float] | None = None,
+    vec_b: dict[str, float] | None = None,
+) -> float:
+    """
+    TF-IDF cosine similarity score [0..1], penalised for quantity mismatch.
+    Vectors are pre-computed and passed in to avoid redundant work during
+    O(n^2) grouping.
+    """
+    if vec_a is None:
+        vec_a = _corpus.vector(name_a)
+    if vec_b is None:
+        vec_b = _corpus.vector(name_b)
+
+    score = _cosine(vec_a, vec_b)
+
     combined_a = f"{name_a} {qty_a}"
     combined_b = f"{name_b} {qty_b}"
     if not _qty_match(combined_a, combined_b):
@@ -143,7 +201,6 @@ def _savings_str(offers: list[dict]) -> str | None:
 # ── Canonical name / qty ──────────────────────────────────────────────────────
 
 def _canonical_name(offers: list[dict]) -> str:
-    """Pick the shortest clean name as canonical (usually least noisy)."""
     names = [o.get("name", "") for o in offers if o.get("name") and o["name"] != "N/A"]
     if not names:
         return "Unknown Product"
@@ -151,12 +208,10 @@ def _canonical_name(offers: list[dict]) -> str:
 
 
 def _canonical_qty(offers: list[dict]) -> str:
-    """Extract quantity from name or quantity field; prefer explicit qty field."""
     for o in offers:
         qty = (o.get("quantity") or "").strip()
         if qty and qty != "N/A":
             return qty
-    # fallback: extract from name
     for o in offers:
         m = _QTY_RE.search(o.get("name", ""))
         if m:
@@ -166,7 +221,7 @@ def _canonical_qty(offers: list[dict]) -> str:
 
 # ── Grouping ──────────────────────────────────────────────────────────────────
 
-MATCH_THRESHOLD = 0.42   # tunable — lower = more aggressive grouping
+MATCH_THRESHOLD = 0.35   # TF-IDF cosine scores; tune lower to merge more aggressively
 
 
 def group_and_compare(
@@ -177,9 +232,13 @@ def group_and_compare(
     """
     Cluster products from all 3 sources into comparison groups.
     Each group has: canonical_name, canonical_qty, offers[], best_deal, savings.
+
+    Steps:
+      1. Fit a TF-IDF corpus over all product names (computes IDF weights).
+      2. Pre-compute one TF-IDF vector per product (avoids O(n^2) re-tokenising).
+      3. Greedy single-linkage clustering using cosine similarity.
     """
 
-    # Tag each product with its source
     all_products: list[dict] = []
     for p in blinkit:
         all_products.append({**p, "source": "blinkit"})
@@ -191,45 +250,55 @@ def group_and_compare(
     if not all_products:
         return []
 
-    # Greedy single-linkage clustering
-    groups: list[list[dict]] = []
+    # Step 1 — fit corpus
+    _corpus.fit([p.get("name", "") for p in all_products])
 
-    for product in all_products:
+    # Step 2 — pre-compute vectors
+    vectors: list[dict[str, float]] = [
+        _corpus.vector(p.get("name", "")) for p in all_products
+    ]
+
+    # Step 3 — greedy single-linkage clustering
+    groups: list[list[int]] = []
+
+    for i, product in enumerate(all_products):
         best_group_idx = None
         best_score = MATCH_THRESHOLD
 
-        for idx, group in enumerate(groups):
-            # Only one offer per source per group
-            existing_sources = {o["source"] for o in group}
+        for gidx, group_indices in enumerate(groups):
+            existing_sources = {all_products[j]["source"] for j in group_indices}
             if product["source"] in existing_sources:
                 continue
 
-            # Compare against every member; take max score
-            for member in group:
+            for j in group_indices:
                 score = _similarity(
-                    product.get("name", ""), product.get("quantity", ""),
-                    member.get("name", ""),  member.get("quantity", ""),
+                    product.get("name", ""),          product.get("quantity", ""),
+                    all_products[j].get("name", ""),  all_products[j].get("quantity", ""),
+                    vec_a=vectors[i],
+                    vec_b=vectors[j],
                 )
                 if score > best_score:
                     best_score = score
-                    best_group_idx = idx
+                    best_group_idx = gidx
 
         if best_group_idx is not None:
-            groups[best_group_idx].append(product)
+            groups[best_group_idx].append(i)
         else:
-            groups.append([product])
+            groups.append([i])
 
-    # Sort groups: cross-source first (most offers), then by price
-    groups.sort(key=lambda g: (-len({o["source"] for o in g}), len(g)))
+    # Assemble result
+    resolved: list[list[dict]] = [
+        [all_products[i] for i in idx_list] for idx_list in groups
+    ]
+    resolved.sort(key=lambda g: (-len({o["source"] for o in g}), len(g)))
 
     result = []
-    for group in groups:
+    for group in resolved:
         c_name = _canonical_name(group)
         c_qty  = _canonical_qty(group)
         best   = _best_offer(group)
         sav    = _savings_str(group)
 
-        # Sort offers: best price first
         sorted_offers = sorted(
             group,
             key=lambda o: (_parse_price(o.get("selling_price")) or 9999)

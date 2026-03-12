@@ -215,7 +215,16 @@ def scrape_blinkit(item: str, location: str) -> list[dict]:
     except Exception as e:
         print(f"[Blinkit] fatal: {e}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        try:
+            import shutil
+            if hasattr(driver, '_tmp_dir'):
+                shutil.rmtree(driver._tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
     return results
 
 

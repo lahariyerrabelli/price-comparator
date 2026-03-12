@@ -1,10 +1,5 @@
 Flask>=3.0
 selenium>=4.20
 pandas>=2.0
+numpy>=1.26
 gunicorn>=22.0
-
-
-sentence-transformers>=2.7
-
-#
-rapidfuzz>=3.0
