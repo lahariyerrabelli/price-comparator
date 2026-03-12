@@ -325,16 +325,30 @@ return arguments[0].map((card, idx) => {
     const img = li.querySelector("a img");
 
     // Price: first div whose direct <span> children start with the rupee sign
+    // Replace the generic allDivs price loop with this:
     let sp = 'N/A', mrp = 'N/A';
-    const allDivs = li.querySelectorAll('div');
-    for (const div of allDivs) {
-        const spans = div.querySelectorAll(':scope > span');
-        if (spans.length >= 1 && spans[0].textContent.includes('\u20b9')) {
-            sp  = spans[0].textContent.trim();
-            mrp = spans.length > 1 ? spans[1].textContent.trim() : 'N/A';
-            break;
+
+    // Target the exact pricing container class
+    const priceBox = li.querySelector("div.sc-krNlru");
+    if (priceBox) {
+        const spans = priceBox.querySelectorAll(':scope > span');
+        if (spans[0]) sp  = spans[0].textContent.trim();  // ₹27
+        if (spans[1]) mrp = spans[1].textContent.trim();  // ₹30
+    } else {
+        // Fallback: first div whose direct spans both contain ₹
+        const allDivs = li.querySelectorAll('div');
+        for (const div of allDivs) {
+            const spans = div.querySelectorAll(':scope > span');
+            if (spans.length >= 2
+                && spans[0].textContent.includes('\u20b9')
+                && spans[1].textContent.includes('\u20b9')) {
+                sp  = spans[0].textContent.trim();
+                mrp = spans[1].textContent.trim();
+                break;
+            }
         }
     }
+    
 
     return {
         name:          ((brand ? brand.innerText.trim() : '') + ' ' +
