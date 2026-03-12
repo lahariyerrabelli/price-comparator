@@ -12,22 +12,54 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # ── Chrome options ────────────────────────────────────────────────────────────
-
 def _make_options() -> Options:
-    """Fresh Options object per thread (not shared — avoids race conditions)."""
+    import tempfile, os
+    
+    # Use /tmp for Chrome data — avoids /dev/shm limitations on Render
+    tmp_dir = tempfile.mkdtemp()
+    
     opts = Options()
     opts.add_argument("--headless=new")
-    opts.add_argument("--start-maximized")
     opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-setuid-sandbox")      # required on Render
+    opts.add_argument("--disable-setuid-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-extensions")
     opts.add_argument("--disable-infobars")
-    opts.add_argument("--remote-debugging-port=9222")  # helps stability
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--disable-background-networking")
+    opts.add_argument("--disable-background-timer-throttling")
+    opts.add_argument("--disable-backgrounding-occluded-windows")
+    opts.add_argument("--disable-breakpad")
+    opts.add_argument("--disable-client-side-phishing-detection")
+    opts.add_argument("--disable-component-update")
+    opts.add_argument("--disable-default-apps")
+    opts.add_argument("--disable-domain-reliability")
+    opts.add_argument("--disable-features=AudioServiceOutOfProcess")
+    opts.add_argument("--disable-hang-monitor")
+    opts.add_argument("--disable-ipc-flooding-protection")
+    opts.add_argument("--disable-popup-blocking")
+    opts.add_argument("--disable-prompt-on-repost")
+    opts.add_argument("--disable-renderer-backgrounding")
+    opts.add_argument("--disable-sync")
+    opts.add_argument("--disable-translate")
+    opts.add_argument("--force-color-profile=srgb")
+    opts.add_argument("--hide-scrollbars")
+    opts.add_argument("--metrics-recording-only")
+    opts.add_argument("--mute-audio")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-zygote")           # ← key flag for low RAM containers
+    opts.add_argument("--single-process")      # ← runs Chrome in single process
+    opts.add_argument("--safebrowsing-disable-auto-update")
+    opts.add_argument("--window-size=1280,720")
+    opts.add_argument(f"--disk-cache-dir={tmp_dir}")
+    opts.add_argument(f"--user-data-dir={tmp_dir}")
+    opts.add_argument("--js-flags=--max-old-space-size=128")
     opts.add_experimental_option("prefs", {
         "profile.default_content_setting_values.notifications": 2,
         "profile.managed_default_content_settings.stylesheets": 2,
+        "profile.managed_default_content_settings.images": 2,
+        "profile.managed_default_content_settings.javascript": 1,
     })
     opts.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -45,7 +77,15 @@ _PAGE_LOAD_TIMEOUT = 12   # seconds for WebDriverWait
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _chrome() -> webdriver.Chrome:
-    return webdriver.Chrome(options=_make_options())
+    import tempfile, shutil
+    tmp_dir = tempfile.mkdtemp()
+    opts = _make_options()
+    # Override with fresh unique dir per instance
+    opts.add_argument(f"--disk-cache-dir={tmp_dir}")
+    opts.add_argument(f"--user-data-dir={tmp_dir}")
+    driver = webdriver.Chrome(options=opts)
+    driver._tmp_dir = tmp_dir  # store for cleanup
+    return driver
 
 
 def _wait_for_cards(driver, css: str, timeout: float = _PAGE_LOAD_TIMEOUT) -> list:
