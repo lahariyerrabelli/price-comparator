@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/        ← this covers your .venv folder
+venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+*.log
